@@ -225,9 +225,10 @@ def monitor():
 
             print(
                 f"{'Ticker':<12} {'Shares':>10} {'Position USD':>15} {'Entry':>10} "
-                f"{'Current':>10} {'P&L':>12} {'P&L %':>10} {'Stop':>10} {'SL Dist%':>10}"
+                f"{'Current':>10} {'P&L':>12} {'P&L %':>10} {'Stop':>10} {'SL Dist%':>10} "
+                f"{'Locked $':>12} {'Locked %':>10}"
             )
-            print("-" * 115)
+            print("-" * 140)
 
             if not pos_list:
                 print("No open positions.")
@@ -259,11 +260,11 @@ def monitor():
                     color = "\033[92m" if p["usd_pnl"] >= 0 else "\033[91m"
 
                     p_usd_str = (
-                        f"{p['usd_pnl']:,.0f}" if abs(p["usd_pnl"]) >= 1 else f"{p['usd_pnl']:.2f}"
+                        f"{p['usd_pnl']:,.2f}" if abs(p["usd_pnl"]) >= 1 else f"{p['usd_pnl']:.2f}"
                     )
                     p_usd_str = ("+" if p["usd_pnl"] > 0 else "") + p_usd_str
                     market_val_str = (
-                        f"{market_val:,.0f}" if market_val >= 1 else f"{market_val:.2f}"
+                        f"{market_val:,.2f}" if market_val >= 1 else f"{market_val:.2f}"
                     )
 
                     stop_price = sl_map.get(p["symbol"], 0.0)
@@ -272,9 +273,20 @@ def monitor():
                     if stop_price > 0 and p["price"] > 0:
                         sl_dist = ((stop_price - p["price"]) / p["price"]) * 100
                         sl_color = "\033[93m" if abs(sl_dist) < 1.5 else reset
-                        sl_dist_str = f"{sl_color}{sl_dist:+.1f}%{reset}"
+                        sl_dist_str = f"{sl_color}{sl_dist:+.2f}%{reset}"
                     else:
                         sl_dist_str = "  ---"
+
+                    if stop_price > 0 and p["avg_price"] > 0:
+                        locked_usd = (stop_price - p["avg_price"]) * p["qty"]
+                        locked_pct = ((stop_price - p["avg_price"]) / p["avg_price"]) * 100
+                        locked_color = "\033[92m" if locked_usd >= 0 else "\033[91m"
+                        locked_usd_s = ("+" if locked_usd > 0 else "") + (
+                            f"{locked_usd:,.2f}" if abs(locked_usd) >= 1 else f"{locked_usd:.2f}"
+                        )
+                        locked_str = f"{locked_color}{locked_usd_s:>12}{reset} {locked_color}{locked_pct:>+9.2f}%{reset}"
+                    else:
+                        locked_str = f"{'---':>12} {'---':>10}"
 
                     curr_price_str = (
                         f"{p['price']:>10.2f}" if p["price"] > 0 else f"{'ERR':>10}"
@@ -284,7 +296,7 @@ def monitor():
                         f"\033[1m{p['symbol']:<12}\033[0m {p['qty']:>10} {market_val_str:>15} "
                         f"{p['avg_price']:>10.2f} {curr_price_str} "
                         f"{color}{p_usd_str:>12}{reset} {color}{p['pct_pnl']:>9.1f}%{reset} "
-                        f"{stop_str:>10} {sl_dist_str:>10}"
+                        f"{stop_str:>10} {sl_dist_str:>10} {locked_str}"
                     )
 
             # ── Footer ──────────────────────────────────────────────────────
