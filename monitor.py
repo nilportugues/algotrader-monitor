@@ -39,8 +39,6 @@ warnings.filterwarnings("ignore", module="yfinance")
 warnings.filterwarnings("ignore", message=".*Ticker.info is deprecated.*")
 
 from brokers.ibkr import IBKRConnection
-from core.risk import manage_trailing_stop
-from core.indicators import IndicatorCalculator
 from helpers.telegram import broadcast_monitor_update
 
 import logging
@@ -198,45 +196,6 @@ def monitor():
                             "contract": pos.contract,
                         }
                     )
-
-            # ── 3. Active protection (trailing stops) ───────────────────────
-            if pos_list:
-                conn.run(conn.ib.reqAllOpenOrdersAsync)
-                conn.run(conn.ib.reqExecutionsAsync)
-
-                import asyncio
-
-                async def fetch_all_atr():
-                    tasks = [
-                        conn.ib.reqHistoricalDataAsync(
-                            p["contract"],
-                            endDateTime="",
-                            durationStr="1800 S",
-                            barSizeSetting="1 min",
-                            whatToShow="TRADES",
-                            useRTH=False,
-                        )
-                        for p in pos_list
-                    ]
-                    return await asyncio.gather(*tasks, return_exceptions=True)
-
-                all_bars = conn.run(fetch_all_atr())
-
-                for i, p in enumerate(pos_list):
-                    bars = all_bars[i] if i < len(all_bars) else None
-                    try:
-                        if bars and len(bars) > 5 and not isinstance(bars, Exception):
-                            df = pd.DataFrame(
-                                [{"High": b.high, "Low": b.low, "Close": b.close} for b in bars]
-                            )
-                            atr_vals = IndicatorCalculator.atr(df, period=5)
-                            atr = atr_vals.iloc[-1] if not atr_vals.empty else p["price"] * 0.01
-                        else:
-                            atr = p["price"] * 0.015
-                    except Exception:
-                        atr = p["price"] * 0.015
-
-                    manage_trailing_stop(p["symbol"], p["avg_price"], p["price"], atr)
 
             # Sort: biggest losers first
             pos_list.sort(key=lambda x: x["usd_pnl"])

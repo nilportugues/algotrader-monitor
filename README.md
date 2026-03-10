@@ -6,8 +6,6 @@ Standalone real-time IBKR portfolio dashboard with dynamic trailing stops.
 
 - Live account summary (net liquidation, daily P&L, unrealized/realized P&L)
 - Open positions table with current price, cost basis, P&L, and stop-loss distance
-- Dynamic trailing-stop management (ratcheting SL, 10%+ half-sell)
-- Anti-short firewall + accidental-short sentinel
 - Optional Telegram broadcast every 60 seconds
 - 1-second refresh cycle via delayed or live market data
 
