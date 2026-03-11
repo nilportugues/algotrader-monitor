@@ -76,6 +76,9 @@ def monitor():
     conn.ib.client.reqAccountUpdates(True, "")
     time.sleep(1)
 
+    # Tracks the stable row order so tickers don't jump around each cycle.
+    symbol_order: dict[str, int] = {}
+
     while True:
         try:
             # Refresh all open orders from all clients every cycle.
@@ -197,8 +200,13 @@ def monitor():
                         }
                     )
 
-            # Sort: biggest losers first
-            pos_list.sort(key=lambda x: x["usd_pnl"])
+            # Assign a stable slot to every symbol the first time it appears.
+            for p in pos_list:
+                if p["symbol"] not in symbol_order:
+                    symbol_order[p["symbol"]] = len(symbol_order)
+
+            # Keep rows in a fixed position; new symbols are appended alphabetically.
+            pos_list.sort(key=lambda x: symbol_order[x["symbol"]])
 
             # ── 4. Render dashboard ─────────────────────────────────────────
             os.system("clear" if os.name == "posix" else "cls")
@@ -284,9 +292,9 @@ def monitor():
                         locked_usd_s = ("+" if locked_usd > 0 else "") + (
                             f"{locked_usd:,.2f}" if abs(locked_usd) >= 1 else f"{locked_usd:.2f}"
                         )
-                        locked_str = f"{locked_color}{locked_usd_s:>12}{reset} {locked_color}{locked_pct:>+9.2f}%{reset}"
+                        locked_str = f"{locked_color}{locked_usd_s}{reset} {locked_color}{locked_pct:>+9.2f}%{reset}"
                     else:
-                        locked_str = f"{'---':>12} {'---':>10}"
+                        locked_str = f"{'---':>6} {'---':>6}"
 
                     curr_price_str = (
                         f"{p['price']:>10.2f}" if p["price"] > 0 else f"{'ERR':>10}"
@@ -294,9 +302,9 @@ def monitor():
 
                     print(
                         f"\033[1m{p['symbol']:<12}\033[0m {p['qty']:>10} {market_val_str:>15} "
-                        f"{p['avg_price']:>10.2f} {curr_price_str} "
-                        f"{color}{p_usd_str:>12}{reset} {color}{p['pct_pnl']:>9.1f}%{reset} "
-                        f"{stop_str:>10} {sl_dist_str:>10} {locked_str}"
+                        f"{p['avg_price']:>10.2f} {curr_price_str}{reset}"
+                        f"{color}{p_usd_str:>12}{reset} {color}{p['pct_pnl']:>12.2f}%{reset} "
+                        f"{stop_str:>12}{reset} {sl_dist_str:>12} {locked_str:>12}"
                     )
 
             # ── Footer ──────────────────────────────────────────────────────
