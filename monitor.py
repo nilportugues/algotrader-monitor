@@ -21,10 +21,11 @@ Environment variables (see .env.example):
 import os
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, time as dtime
 
 from dotenv import load_dotenv
 import pandas as pd
+import pytz
 
 # Load .env and set this service's client ID BEFORE any IBKR code loads.
 load_dotenv()
@@ -63,6 +64,58 @@ def fmt_pct(val):
         return "0.00%"
     color = "\033[92m" if val >= 0 else "\033[91m"
     return f"{color}{val:+.2f}%\033[0m"
+
+
+# ── Market status ────────────────────────────────────────────────────────────
+
+_ET = pytz.timezone("America/New_York")
+
+_HOLIDAYS_2025_2026 = {
+    # 2025
+    datetime(2025, 1, 1).date(),   # New Year's Day
+    datetime(2025, 1, 20).date(),  # MLK Day
+    datetime(2025, 2, 17).date(),  # Presidents' Day
+    datetime(2025, 4, 18).date(),  # Good Friday
+    datetime(2025, 5, 26).date(),  # Memorial Day
+    datetime(2025, 6, 19).date(),  # Juneteenth
+    datetime(2025, 7, 4).date(),   # Independence Day
+    datetime(2025, 9, 1).date(),   # Labor Day
+    datetime(2025, 11, 27).date(), # Thanksgiving
+    datetime(2025, 12, 25).date(), # Christmas
+    # 2026
+    datetime(2026, 1, 1).date(),   # New Year's Day
+    datetime(2026, 1, 19).date(),  # MLK Day
+    datetime(2026, 2, 16).date(),  # Presidents' Day
+    datetime(2026, 4, 3).date(),   # Good Friday
+    datetime(2026, 5, 25).date(),  # Memorial Day
+    datetime(2026, 6, 19).date(),  # Juneteenth
+    datetime(2026, 7, 3).date(),   # Independence Day (observed)
+    datetime(2026, 9, 7).date(),   # Labor Day
+    datetime(2026, 11, 26).date(), # Thanksgiving
+    datetime(2026, 12, 25).date(), # Christmas
+}
+
+def market_status() -> str:
+    """Return a coloured market-status string based on NYSE/NASDAQ hours (ET)."""
+    now_et = datetime.now(_ET)
+    today = now_et.date()
+    t = now_et.time()
+
+    if now_et.weekday() >= 5 or today in _HOLIDAYS_2025_2026:
+        return "\033[90m● CLOSED (weekend/holiday)\033[0m"
+
+    pre_open  = dtime(4, 0)
+    mkt_open  = dtime(9, 30)
+    mkt_close = dtime(16, 0)
+    ah_close  = dtime(20, 0)
+
+    if t < pre_open or t >= ah_close:
+        return "\033[90m● CLOSED\033[0m"
+    if pre_open <= t < mkt_open:
+        return "\033[93m● PRE-MARKET\033[0m"
+    if mkt_open <= t < mkt_close:
+        return "\033[92m● MARKET OPEN\033[0m"
+    return "\033[93m● AFTER-HOURS\033[0m"
 
 
 # ── Main loop ───────────────────────────────────────────────────────────────
@@ -210,6 +263,9 @@ def monitor():
 
             # ── 4. Render dashboard ─────────────────────────────────────────
             os.system("clear" if os.name == "posix" else "cls")
+
+            status_str = market_status()
+            print(f"  {status_str}\n")
 
             color_daily = "\033[92m" if daily_pnl >= 0 else "\033[91m"
             color_unreal = "\033[92m" if unrealized_pnl >= 0 else "\033[91m"
