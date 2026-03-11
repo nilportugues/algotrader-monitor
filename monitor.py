@@ -18,6 +18,7 @@ Environment variables (see .env.example):
     TELEGRAM_CHAT_ID
 """
 
+import asyncio
 import os
 import sys
 import time
@@ -36,8 +37,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import warnings
 warnings.filterwarnings("ignore", message=".*utcnow is deprecated.*")
-warnings.filterwarnings("ignore", module="yfinance")
-warnings.filterwarnings("ignore", message=".*Ticker.info is deprecated.*")
 
 from brokers.ibkr import IBKRConnection
 from helpers.telegram import broadcast_monitor_update
@@ -70,50 +69,63 @@ def fmt_pct(val):
 
 _ET = pytz.timezone("America/New_York")
 
-_HOLIDAYS_2025_2026 = {
-    # 2025
-    datetime(2025, 1, 1).date(),   # New Year's Day
-    datetime(2025, 1, 20).date(),  # MLK Day
-    datetime(2025, 2, 17).date(),  # Presidents' Day
-    datetime(2025, 4, 18).date(),  # Good Friday
-    datetime(2025, 5, 26).date(),  # Memorial Day
-    datetime(2025, 6, 19).date(),  # Juneteenth
-    datetime(2025, 7, 4).date(),   # Independence Day
-    datetime(2025, 9, 1).date(),   # Labor Day
-    datetime(2025, 11, 27).date(), # Thanksgiving
-    datetime(2025, 12, 25).date(), # Christmas
-    # 2026
-    datetime(2026, 1, 1).date(),   # New Year's Day
-    datetime(2026, 1, 19).date(),  # MLK Day
-    datetime(2026, 2, 16).date(),  # Presidents' Day
-    datetime(2026, 4, 3).date(),   # Good Friday
-    datetime(2026, 5, 25).date(),  # Memorial Day
-    datetime(2026, 6, 19).date(),  # Juneteenth
-    datetime(2026, 7, 3).date(),   # Independence Day (observed)
-    datetime(2026, 9, 7).date(),   # Labor Day
-    datetime(2026, 11, 26).date(), # Thanksgiving
-    datetime(2026, 12, 25).date(), # Christmas
-}
+try:
+    import exchange_calendars as xcals
+    _NYSE_CAL = xcals.get_calendar("XNYS")
+    _USE_XCALS = True
+except Exception:
+    _NYSE_CAL = None
+    _USE_XCALS = False
+
 
 def market_status() -> str:
-    """Return a coloured market-status string based on NYSE/NASDAQ hours (ET)."""
+    """Return a coloured market-status string using the live NYSE calendar.
+
+    Session windows (all times Eastern):
+        Pre-market  04:00 – 09:30
+        Regular     09:30 – 16:00  (13:00 on early-close days)
+        After-hours 16:00 – 20:00  (skipped on early-close days)
+        Closed      outside the above, weekends, and market holidays
+    """
     now_et = datetime.now(_ET)
-    today = now_et.date()
     t = now_et.time()
 
-    if now_et.weekday() >= 5 or today in _HOLIDAYS_2025_2026:
-        return "\033[90m● CLOSED (weekend/holiday)\033[0m"
+    _PRE_OPEN = dtime(4, 0)
+    _AH_CLOSE = dtime(20, 0)
+    _MKT_OPEN_DEFAULT  = dtime(9, 30)
+    _MKT_CLOSE_DEFAULT = dtime(16, 0)
 
-    pre_open  = dtime(4, 0)
-    mkt_open  = dtime(9, 30)
-    mkt_close = dtime(16, 0)
-    ah_close  = dtime(20, 0)
+    if _USE_XCALS:
+        try:
+            ts_today = pd.Timestamp(now_et.date())
+            if not _NYSE_CAL.is_session(ts_today):
+                return "\033[90m● CLOSED (weekend/holiday)\033[0m"
 
-    if t < pre_open or t >= ah_close:
+            open_ts  = _NYSE_CAL.session_open(ts_today).tz_convert(_ET)
+            close_ts = _NYSE_CAL.session_close(ts_today).tz_convert(_ET)
+            mkt_open_t  = open_ts.time()
+            mkt_close_t = close_ts.time()
+
+            # On early-close days (e.g. day after Thanksgiving) there is no
+            # regular after-hours session; cap AH at the early close time.
+            ah_close_t = _AH_CLOSE if mkt_close_t >= _MKT_CLOSE_DEFAULT else mkt_close_t
+        except Exception:
+            mkt_open_t  = _MKT_OPEN_DEFAULT
+            mkt_close_t = _MKT_CLOSE_DEFAULT
+            ah_close_t  = _AH_CLOSE
+    else:
+        # Fallback: basic weekday check only (no holiday detection)
+        if now_et.weekday() >= 5:
+            return "\033[90m● CLOSED (weekend)\033[0m"
+        mkt_open_t  = _MKT_OPEN_DEFAULT
+        mkt_close_t = _MKT_CLOSE_DEFAULT
+        ah_close_t  = _AH_CLOSE
+
+    if t < _PRE_OPEN or t >= ah_close_t:
         return "\033[90m● CLOSED\033[0m"
-    if pre_open <= t < mkt_open:
+    if _PRE_OPEN <= t < mkt_open_t:
         return "\033[93m● PRE-MARKET\033[0m"
-    if mkt_open <= t < mkt_close:
+    if mkt_open_t <= t < mkt_close_t:
         return "\033[92m● MARKET OPEN\033[0m"
     return "\033[93m● AFTER-HOURS\033[0m"
 
@@ -125,22 +137,41 @@ def monitor():
     print("🔄 Connecting to IBKR…")
     conn.connect()
 
-    conn.ib.reqMarketDataType(3)       # 3 = Delayed (works without live data subscriptions)
-    conn.ib.client.reqAccountUpdates(True, "")
-    time.sleep(1)
+    conn.ib.reqMarketDataType(3)          # 3 = Delayed (no live-data subscription required)
+    conn.ib.client.reqAccountUpdates(True, "")  # streams account values continuously
+    # Subscribe to real-time position updates so the cache stays current.
+    try:
+        conn.run(conn.ib.reqPositionsAsync)
+    except Exception:
+        conn.ib.reqPositions()
+
+    # Pump the event loop so initial account/position data arrives before first render.
+    conn.run(asyncio.sleep, 2.0)
 
     # Tracks the stable row order so tickers don't jump around each cycle.
     symbol_order: dict[str, int] = {}
+    # Symbols for which reqMktData has already been called (subscribe exactly once).
+    subscribed_symbols: set[str] = set()
+    # Throttle: refresh open orders every 5 s (one round-trip per second is wasteful).
+    _last_order_refresh = time.monotonic() - 10.0  # negative offset forces first-cycle refresh
 
     while True:
         try:
-            # Refresh all open orders from all clients every cycle.
-            conn.run(conn.ib.reqAllOpenOrdersAsync)
+            now = time.monotonic()
+
+            # Yield to the ib_async event loop so all queued incoming messages
+            # (ticks, account values, position updates) are processed before we read them.
+            conn.run(asyncio.sleep, 0.0)
+
+            # ── Refresh open orders (throttled to every 5 s) ─────────────────
+            if now - _last_order_refresh >= 5.0:
+                conn.run(conn.ib.reqAllOpenOrdersAsync)
+                _last_order_refresh = now
 
             # ── 1. Account summary ──────────────────────────────────────────
             summary = conn.ib.accountValues()
             if not summary:
-                time.sleep(1)
+                conn.run(asyncio.sleep, 1.0)
                 continue
 
             data: dict = {}
@@ -187,16 +218,18 @@ def monitor():
             pos_list = []
 
             if positions:
-                subscribed_conids = {
-                    t.contract.conId for t in conn.ib.tickers() if t.contract
-                }
-                for p in positions:
-                    c = p.contract
-                    if getattr(c, "conId", 0) not in subscribed_conids and getattr(c, "conId", 0) != 0:
-                        try:
-                            conn.ib.reqMktData(c, "", False, False)
-                        except Exception:
-                            pass
+                # Subscribe market data for any symbol we haven't seen before (once only).
+                new_contracts = [
+                    p.contract for p in positions
+                    if p.contract.symbol not in subscribed_symbols
+                    and getattr(p.contract, "conId", 0) != 0
+                ]
+                for c in new_contracts:
+                    try:
+                        conn.ib.reqMktData(c, "", False, False)
+                        subscribed_symbols.add(c.symbol)
+                    except Exception:
+                        pass
 
                 ticker_map = {t.contract.symbol: t for t in conn.ib.tickers() if t.contract}
 
@@ -219,15 +252,6 @@ def monitor():
                                     else 0.0
                                 )
                             )
-
-                    if pd.isna(curr_price) or curr_price == 0.0:
-                        try:
-                            import yfinance as yf
-                            info = getattr(yf.Ticker(symbol), "fast_info", None)
-                            if info and getattr(info, "last_price", 0) > 0:
-                                curr_price = info.last_price
-                        except Exception:
-                            pass
 
                     if pd.isna(curr_price) or curr_price == 0.0:
                         curr_price = 0.0
@@ -258,8 +282,30 @@ def monitor():
                 if p["symbol"] not in symbol_order:
                     symbol_order[p["symbol"]] = len(symbol_order)
 
-            # Keep rows in a fixed position; new symbols are appended alphabetically.
+            # Keep rows in a fixed position; new symbols are appended at the end.
             pos_list.sort(key=lambda x: symbol_order[x["symbol"]])
+
+            # ── 3. Stop-loss map (always built from live open orders) ────────
+            sl_map: dict = {}
+            for t in conn.ib.openTrades():
+                if t.order.orderType in ["STP", "STP LMT", "TRAIL", "TRAIL LIMIT"]:
+                    symbol = t.contract.symbol
+                    price = 0.0
+                    if t.order.orderType in ["TRAIL", "TRAIL LIMIT"]:
+                        ts_price = getattr(t.orderStatus, "trailStopPrice", 0)
+                        if 0 < ts_price < 1_000_000:
+                            price = ts_price
+                    if price <= 0:
+                        p = (
+                            t.order.auxPrice
+                            if 0 < t.order.auxPrice < 1_000_000
+                            else t.order.lmtPrice
+                        )
+                        if 0 < p < 1_000_000:
+                            price = p
+                    if price > 0:
+                        if symbol not in sl_map or price > sl_map[symbol]:
+                            sl_map[symbol] = price
 
             # ── 4. Render dashboard ─────────────────────────────────────────
             os.system("clear" if os.name == "posix" else "cls")
@@ -297,28 +343,6 @@ def monitor():
             if not pos_list:
                 print("No open positions.")
             else:
-                # Build stop-loss map from live open orders
-                sl_map: dict = {}
-                for t in conn.ib.openTrades():
-                    if t.order.orderType in ["STP", "STP LMT", "TRAIL", "TRAIL LIMIT"]:
-                        symbol = t.contract.symbol
-                        price = 0.0
-                        if t.order.orderType in ["TRAIL", "TRAIL LIMIT"]:
-                            ts_price = getattr(t.orderStatus, "trailStopPrice", 0)
-                            if 0 < ts_price < 1_000_000:
-                                price = ts_price
-                        if price <= 0:
-                            p = (
-                                t.order.auxPrice
-                                if 0 < t.order.auxPrice < 1_000_000
-                                else t.order.lmtPrice
-                            )
-                            if 0 < p < 1_000_000:
-                                price = p
-                        if price > 0:
-                            if symbol not in sl_map or price > sl_map[symbol]:
-                                sl_map[symbol] = price
-
                 for p in pos_list:
                     market_val = p["qty"] * p["price"]
                     color = "\033[92m" if p["usd_pnl"] >= 0 else "\033[91m"
@@ -375,8 +399,8 @@ def monitor():
             losers = [p for p in pos_list if p["usd_pnl"] <= 0]
             print(f"\n\033[92mWinners: {len(winners)}\033[0m | \033[91mLosers: {len(losers)}\033[0m")
 
-            # Realized today from fills
-            fills = conn.run(conn.ib.fills)
+            # Realized today from fills (read directly from the in-memory cache).
+            fills = conn.ib.fills()
             today_realized_map: dict = {}
             for f in fills:
                 if f.time.date() == datetime.now().date():
@@ -404,16 +428,17 @@ def monitor():
                 unrealized_pnl=unrealized_pnl,
                 realized_pnl=realized_pnl,
                 pos_list=pos_list,
-                sl_map=sl_map if "sl_map" in locals() else {},
+                sl_map=sl_map,
             )
 
-            time.sleep(1)
+            # Sleep via the event loop so incoming IBKR messages keep flowing.
+            conn.run(asyncio.sleep, 1.0)
 
         except KeyboardInterrupt:
             break
         except Exception as e:
             print(f"❌ Error: {e}")
-            time.sleep(1)
+            conn.run(asyncio.sleep, 1.0)
 
 
 if __name__ == "__main__":
