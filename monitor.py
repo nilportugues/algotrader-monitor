@@ -152,7 +152,7 @@ def monitor():
     symbol_order: dict[str, int] = {}
     # Symbols for which reqMktData has already been called (subscribe exactly once).
     subscribed_symbols: set[str] = set()
-    # Throttle: refresh open orders every 5 s (one round-trip per second is wasteful).
+    # Refresh open orders every 1 s to keep stop-loss values up to date.
     _last_order_refresh = time.monotonic() - 10.0  # negative offset forces first-cycle refresh
 
     while True:
@@ -163,8 +163,8 @@ def monitor():
             # (ticks, account values, position updates) are processed before we read them.
             conn.run(asyncio.sleep, 0.0)
 
-            # ── Refresh open orders (throttled to every 5 s) ─────────────────
-            if now - _last_order_refresh >= 5.0:
+            # ── Refresh open orders (every 1 s) ─────────────────────────────
+            if now - _last_order_refresh >= 1.0:
                 conn.run(conn.ib.reqAllOpenOrdersAsync)
                 _last_order_refresh = now
 
