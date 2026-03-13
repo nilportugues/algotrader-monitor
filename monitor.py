@@ -138,7 +138,10 @@ def monitor():
     conn.connect()
 
     conn.ib.reqMarketDataType(3)          # 3 = Delayed (no live-data subscription required)
-    conn.ib.client.reqAccountUpdates(True, "")  # streams account values continuously
+    # Subscribe to account value streaming using the real account ID.
+    # An empty string causes TWS to fire only an initial snapshot and then go silent.
+    _acct = conn.account_id or ""
+    conn.ib.client.reqAccountUpdates(True, _acct)
     # Subscribe to real-time position updates so the cache stays current.
     try:
         conn.run(conn.ib.reqPositionsAsync)
@@ -154,6 +157,8 @@ def monitor():
     subscribed_symbols: set[str] = set()
     # Refresh open orders every 1 s to keep stop-loss values up to date.
     _last_order_refresh = time.monotonic() - 10.0  # negative offset forces first-cycle refresh
+    # Re-send reqAccountUpdates every 30 s to prevent the stream going silent.
+    _last_acct_resub = time.monotonic()
 
     while True:
         try:
@@ -162,6 +167,11 @@ def monitor():
             # Yield to the ib_async event loop so all queued incoming messages
             # (ticks, account values, position updates) are processed before we read them.
             conn.run(asyncio.sleep, 0.0)
+
+            # ── Re-subscribe account updates (every 30 s) ──────────────────
+            if now - _last_acct_resub >= 30.0:
+                conn.ib.client.reqAccountUpdates(True, _acct)
+                _last_acct_resub = now
 
             # ── Refresh open orders (every 1 s) ─────────────────────────────
             if now - _last_order_refresh >= 1.0:
